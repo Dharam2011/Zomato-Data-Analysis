@@ -1,0 +1,40 @@
+CREATE OR REPLACE PROCEDURE CONFIG_PROC(config_table_name VARCHAR(50), file_name VARCHAR(50), date_time_txt VARCHAR(50), status VARCHAR(50),destination_table_name VARCHAR(50))
+  RETURNS VARCHAR(50)
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.8'
+  PACKAGES = ('snowflake-snowpark-python')
+  HANDLER = 'run'
+AS
+$$
+import snowflake.connector
+from snowflake.snowpark.session import Session
+from snowflake.snowpark.functions import col,lit,concat
+from snowflake.snowpark.functions import udf, col, lit, translate, is_null, iff
+from snowflake.snowpark.types import IntegerType, StringType, StructType, StructField
+def run(session,config_table_name,file_name,date_time_txt,status,destination_table_name):
+
+  
+	#count same name file
+  count_file=session.table(config_table_name).where(col('filename').in_(file_name)).count()
+
+  #check if file is already exits or not
+  if count_file == 0:
+
+  	#if file is not exits so insert current file details in config table
+    
+    session.sql("insert into "+config_table_name+" values('"+file_name+"','"+date_time_txt+"','"+status+"','"+destination_table_name+"',1)").collect()
+    
+  else:
+
+  	#if file is exits so upadate a load status and date and time
+    
+    #session.table(config_table_name).update({"status":status,"date_time":date_time_txt},col("filename")==file_name)
+    session.table(config_table_name).update({"status":status,"date_time":concat(
+col("date_time").try_cast(StringType()),lit(','),lit(date_time_txt)),"file_count":col("file_count")+1},col("filename")==file_name)
+       
+
+ 
+  return "SUCCESS"
+$$;
+
+CALL CONFIG_PROC('config','data.csv','9/10/2023','TRUE','zomato_raw_data');

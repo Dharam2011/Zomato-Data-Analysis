@@ -1,0 +1,22 @@
+CREATE OR REPLACE TABLE zomato_raw_data(
+    Restaurant_ID NUMBER,
+    Restaturant_Name VARCHAR(100),
+    Country_Code INT,
+    City VARCHAR(150),
+    Address VARCHAR(200),
+    Locality VARCHAR(100),
+    Locality_Verbose VARCHAR(100),
+    Longitude DOUBLE,
+    Latitude DOUBLE,
+    Cuisines VARCHAR(100),
+    Average_Cost_for_two  INT,
+    Currency VARCHAR(100),
+    Has_Table_booking VARCHAR(4),
+    Has_Online_delivery VARCHAR(4),
+    Price_range INT,
+    Aggregate_rating FLOAT,
+    Rating_color VARCHAR(50), 
+    Rating_text VARCHAR(50),
+    votes INT,
+    unique_key VARCHAR(200)
+);

@@ -1,0 +1,1 @@
+create or replace table config (filename varchar(150),date_time varchar(500),status varchar(10),destination_table varchar(200),file_count int);
