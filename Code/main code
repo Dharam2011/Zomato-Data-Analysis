@@ -1,0 +1,204 @@
+CREATE OR REPLACE PROCEDURE CONFIG_PROC(config_table_name VARCHAR(50), file_name VARCHAR(50), date_time_txt VARCHAR(50), status VARCHAR(50),destination_table_name VARCHAR(50))
+  RETURNS VARCHAR(50)
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.8'
+  PACKAGES = ('snowflake-snowpark-python')
+  HANDLER = 'run'
+AS
+$$
+import snowflake.connector
+from snowflake.snowpark.session import Session
+from snowflake.snowpark.functions import col,lit,concat
+from snowflake.snowpark.functions import udf, col, lit, translate, is_null, iff
+from snowflake.snowpark.types import IntegerType, StringType, StructType, StructField
+def run(session,config_table_name,file_name,date_time_txt,status,destination_table_name):
+
+  
+	#count same name file
+  count_file=session.table(config_table_name).where(col('filename').in_(file_name)).count()
+
+  #check if file is already exits or not
+  if count_file == 0:
+
+  	#if file is not exits so insert current file details in config table
+    
+    session.sql("insert into "+config_table_name+" values('"+file_name+"','"+date_time_txt+"','"+status+"','"+destination_table_name+"',1)").collect()
+    
+  else:
+
+  	#if file is exits so upadate a load status and date and time
+    
+    #session.table(config_table_name).update({"status":status,"date_time":date_time_txt},col("filename")==file_name)
+    session.table(config_table_name).update({"status":status,"date_time":concat(
+col("date_time").try_cast(StringType()),lit(','),lit(date_time_txt)),"file_count":col("file_count")+1},col("filename")==file_name)
+       
+
+ 
+  return "SUCCESS"
+$$;
+
+CALL CONFIG_PROC('config','data.csv','9/10/2023','TRUE','zomato_raw_data');
+
+create or replace table config (filename varchar(150),date_time varchar(500),status varchar(10),destination_table varchar(200),file_count int);
+
+create table country (country_code int , country_name varchar(100));
+
+CREATE OR REPLACE PROCEDURE ZOMATO_PROC(zomato_raw_data_table VARCHAR(100),zomato_country_table VARCHAR(100),zomato_clean_data_table VARCHAR(100))
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.8'
+  PACKAGES = ('snowflake-snowpark-python')
+  HANDLER = 'run'
+AS
+$$
+import snowflake.connector
+from snowflake.snowpark.session import Session
+from snowflake.snowpark.functions import col,split,regexp_replace,when,lit
+from snowflake.snowpark.functions import udf, col, lit, translate, is_null, iff,trim
+from snowflake.snowpark.types import IntegerType, StringType, StructType, StructField
+def run(session,zomato_raw_data_table,zomato_country_table,zomato_clean_data_table):
+  
+  
+  #update a unique key in zomato raw data using hash key
+  session.sql("update "+zomato_raw_data_table+" set unique_key=HASH(Restaurant_ID,Country_Code,City,Address,Cuisines,Average_Cost_for_two,Has_Table_booking,Has_Online_delivery,Price_range,Aggregate_rating,Rating_color,Rating_text,votes)").collect()
+
+  #get a zomato raw data from snowflake
+  zomato_raw_data=session.table(zomato_raw_data_table)
+
+  #get a country data from snowflake
+  country_data=session.table(zomato_country_table)
+
+  #get only a unique key from zomato clean data table
+  unique_key=session.table(zomato_clean_data_table).select("unique_key")
+
+  #get only unique record from zomato raw data table which is not transformed
+  zomato_data=zomato_raw_data.filter(col("unique_key").isin(unique_key)).select("RESTAURANT_ID",
+"RESTATURANT_NAME","COUNTRY_CODE","CITY","ADDRESS","LOCALITY","LOCALITY_VERBOSE","LONGITUDE","LATITUDE","CUISINES","AVERAGE_COST_FOR_TWO","CURRENCY","HAS_TABLE_BOOKING","HAS_ONLINE_DELIVERY","PRICE_RANGE","AGGREGATE_RATING","RATING_COLOR","RATING_TEXT","VOTES","UNIQUE_KEY")
+
+  zomato_data=zomato_raw_data.subtract(zomato_data)
+
+
+	#join a zomato raw data table and country data table
+  new_zomato_data=zomato_data.join(country_data, zomato_data.col("COUNTRY_CODE") == country_data.col("COUNTRY_CODE")).select("RESTAURANT_ID","RESTATURANT_NAME","CITY","ADDRESS","LOCALITY","LOCALITY_VERBOSE","LONGITUDE","LATITUDE","CUISINES","AVERAGE_COST_FOR_TWO","CURRENCY","HAS_TABLE_BOOKING","HAS_ONLINE_DELIVERY","PRICE_RANGE","AGGREGATE_RATING","RATING_COLOR","RATING_TEXT","VOTES",zomato_data['COUNTRY_CODE'].as_("COUNTRY_CODE"),"COUNTRY_NAME","UNIQUE_KEY")
+
+  #DROP DUPLICATE IF SAME RECORD IS EXITS IN SAME DATAFRAME
+  new_zomato_data=new_zomato_data.drop_duplicates("RESTAURANT_ID","RESTATURANT_NAME","CITY","ADDRESS","LOCALITY",
+"LOCALITY_VERBOSE","LONGITUDE","LATITUDE","CUISINES","AVERAGE_COST_FOR_TWO","CURRENCY","HAS_TABLE_BOOKING","HAS_ONLINE_DELIVERY","PRICE_RANGE","AGGREGATE_RATING","RATING_COLOR","RATING_TEXT","VOTES","COUNTRY_CODE","COUNTRY_NAME","UNIQUE_KEY")
+
+
+
+#drop row when cuisines is null    
+  new_zomato_data=new_zomato_data.filter(col("CUISINES").isNotNull())
+
+
+	#convert the avg cost for two into dollar amount and replace all currency with the dollar
+
+    #Convert indonesain Rupiah to Dollar($) and repalce currency Indonesian Rupiah(IDR) to Dollar($)
+  new_zomato_data=new_zomato_data.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==94,
+col("AVERAGE_COST_FOR_TWO")*0.000066).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==94,"Dollar($)").otherwise(col("CURRENCY")))\
+
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==1,col("AVERAGE_COST_FOR_TWO")*0.012).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==1,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==162,col("AVERAGE_COST_FOR_TWO")*0.076).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==162,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==191,col("AVERAGE_COST_FOR_TWO")*0.0028).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==191,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==215,col("AVERAGE_COST_FOR_TWO")*1.22).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==215,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==148,col("AVERAGE_COST_FOR_TWO")*0.63).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==148,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==208,col("AVERAGE_COST_FOR_TWO")*0.053).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==208,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==30,col("AVERAGE_COST_FOR_TWO")*0.19).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==30,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==214,col("AVERAGE_COST_FOR_TWO")*0.27).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==214,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==166,col("AVERAGE_COST_FOR_TWO")*0.27).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==166,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==189,col("AVERAGE_COST_FOR_TWO")*0.056).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==189,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==14,col("AVERAGE_COST_FOR_TWO")*0.69).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==14,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==37,col("AVERAGE_COST_FOR_TWO")*0.75).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==37,"Dollar($)").otherwise(col("CURRENCY")))\
+.withColumn("AVERAGE_COST_FOR_TWO",when(col("COUNTRY_CODE")==184,col("AVERAGE_COST_FOR_TWO")*0.75).otherwise(col("AVERAGE_COST_FOR_TWO")))\
+.withColumn("CURRENCY",when(col("COUNTRY_CODE")==184,"Dollar($)").otherwise(col("CURRENCY")))\
+    
+  
+	#Convert CUISINES column datatype comma separated to array 
+  
+  new_zomato_data=new_zomato_data.select(col('RESTAURANT_ID'),col('RESTATURANT_NAME'),
+col('CITY'),col("ADDRESS"),
+col("LOCALITY"),col("LOCALITY_VERBOSE"),col("LONGITUDE"),col("LATITUDE"),split(col('CUISINES'),lit(',')).alias("CUISINES"),col("AVERAGE_COST_FOR_TWO"),col("CURRENCY"),col('HAS_TABLE_BOOKING'),col('HAS_ONLINE_DELIVERY'),col("PRICE_RANGE"),col("AGGREGATE_RATING"),col("RATING_COLOR"),col("RATING_TEXT"),col("VOTES"),col("COUNTRY_CODE"),col("COUNTRY_NAME"),col("UNIQUE_KEY"))
+    
+    #Split the CUISINES Column into separated rows
+  new_zomato_data=new_zomato_data.flatten(new_zomato_data["CUISINES"])
+
+  
+    #Create a final Dataframe
+  new_zomato_data=new_zomato_data.select(col('RESTAURANT_ID'),col('RESTATURANT_NAME'),col('CITY'),
+col("ADDRESS"),col("LOCALITY"),col("LOCALITY_VERBOSE"),col("LONGITUDE"),col("LATITUDE"),trim(regexp_replace(col('VALUE'),"\"","")).alias("CUISINES"),col("AVERAGE_COST_FOR_TWO"),col("CURRENCY"),col('HAS_TABLE_BOOKING'),col('HAS_ONLINE_DELIVERY'),col("PRICE_RANGE"),col("AGGREGATE_RATING"),col("RATING_COLOR"),col("RATING_TEXT"),col("VOTES"),col("COUNTRY_CODE"),col("COUNTRY_NAME"),col("UNIQUE_KEY"))
+    
+  #Save a transform data in the table
+  new_zomato_data.write.mode("append").save_as_table(zomato_clean_data_table)
+
+
+#Create a view for the requirement field 
+  session.table(zomato_clean_data_table).select(col("RESTAURANT_ID"),col("RESTATURANT_NAME"),
+col("CITY"),col("ADDRESS"),col("LONGITUDE"),col("LATITUDE"),col("LOCALITY"),col("CUISINES"),col("COUNTRY_CODE"),col("COUNTRY_NAME"),col("AVERAGE_COST_FOR_TWO"),col("CURRENCY"),col("HAS_TABLE_BOOKING"),col("HAS_ONLINE_DELIVERY"),col("AGGREGATE_RATING"),col("PRICE_RANGE"),col("VOTES")).create_or_replace_view("zomato_analysis_view")
+
+
+
+
+  return "SUCCESS"
+
+$$;
+
+CALL ZOMATO_PROC('zomato_raw_data','country','zomato_data')
+
+CREATE OR REPLACE TABLE zomato_data(
+    RESTAURANT_ID NUMBER,
+    RESTATURANT_NAME VARCHAR(100),
+    CITY VARCHAR(150),
+    ADDRESS VARCHAR(200),
+    LOCALITY VARCHAR(100),
+    LOCALITY_VERBOSE VARCHAR(100),
+    LONGITUDE DOUBLE,
+    LATITUDE DOUBLE,
+    CUISINES VARCHAR(100),
+    AVERAGE_COST_FOR_TWO  DOUBLE,
+    CURRENCY VARCHAR(100),
+    HAS_TABLE_BOOKING VARCHAR(4),
+    HAS_ONLINE_DELIVERY VARCHAR(4),
+    PRICE_RANGE INT,
+    AGGREGATE_RATING FLOAT,
+    RATING_COLOR VARCHAR(50), 
+    RATING_TEXT VARCHAR(50),
+    VOTES INT,
+    COUNTRY_CODE INT,
+    COUNTRY_NAME VARCHAR(100),
+    unique_key VARCHAR(200)
+);
+CREATE OR REPLACE TABLE zomato_raw_data(
+    Restaurant_ID NUMBER,
+    Restaturant_Name VARCHAR(100),
+    Country_Code INT,
+    City VARCHAR(150),
+    Address VARCHAR(200),
+    Locality VARCHAR(100),
+    Locality_Verbose VARCHAR(100),
+    Longitude DOUBLE,
+    Latitude DOUBLE,
+    Cuisines VARCHAR(100),
+    Average_Cost_for_two  INT,
+    Currency VARCHAR(100),
+    Has_Table_booking VARCHAR(4),
+    Has_Online_delivery VARCHAR(4),
+    Price_range INT,
+    Aggregate_rating FLOAT,
+    Rating_color VARCHAR(50), 
+    Rating_text VARCHAR(50),
+    votes INT,
+    unique_key VARCHAR(200)
+);
